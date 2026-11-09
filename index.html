@@ -8,6 +8,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Lane Clash">
 <meta name="theme-color" content="#0b0f1e">
+<link rel="icon" href="data:,">
 <title>Lane Clash</title>
 <link id="appleIcon" rel="apple-touch-icon" href="">
 <link id="manifestLink" rel="manifest" href="">
@@ -50,8 +51,74 @@ try{
 
 // ---------- helpers ----------
 const rand=(a,b)=>a+Math.random()*(b-a), randi=(a,b)=>Math.floor(rand(a,b+1)), clamp=(v,a,b)=>v<a?a:v>b?b:v;
-let BEST=0;try{BEST=+localStorage.getItem('laneClashBest')||0;}catch(e){}
-function saveBest(){try{localStorage.setItem('laneClashBest',BEST);}catch(e){}}
+
+// Shared squad tuning. Caps and step sizes are lower than the original release
+// so damage, fire rate, multishot, and squad size cannot multiply without limit.
+const PLAYER={
+  ratePer:0.55,dmgPer:1,multiPer:1,squadPer:1,healPer:10,
+  rateMin:1,rateMax:10,dmgMin:1,dmgMax:12,multiMin:1,multiMax:2,squadMin:0,squadMax:3
+};
+// Horde profiles. Normal is a moderate step up from the original curve.
+// Hard and Insane use the same squad rules and raise pressure from that baseline.
+const MODES={
+  normal:{
+    id:'normal',label:'Normal',banner:'NORMAL',color:'#51cf66',
+    hint:'Firmer waves than the original',
+    hp0:2,hpW:1.2,hpExp:1.175,hpCurve:0.02,bigMul:3.05,speedMul:1.06,
+    dmgSmall:7,dmgBig:14,countMul:1.12,gapMul:0.94,gapFloor:0.26,
+    doubleAfter:3,doubleP:0.22,bigBase:0.09,bigPer:0.02,bigCap:0.38,
+    bossHpMul:1.35,bossSpMul:1.08,bossDmg:64,
+    riskyBase:0.32,riskyPer:0.03,riskyCap:0.58,
+    gateNeedMul:1.65,gateSpMul:1.05,gateGapMul:1
+  },
+  hard:{
+    id:'hard',label:'Hard',banner:'HARD',color:'#fcc419',
+    hint:'Heavier horde and riskier gates',
+    hp0:2.45,hpW:1.55,hpExp:1.2,hpCurve:0.028,bigMul:3.3,speedMul:1.12,
+    dmgSmall:9,dmgBig:18,countMul:1.22,gapMul:0.84,gapFloor:0.23,
+    doubleAfter:2,doubleP:0.36,bigBase:0.13,bigPer:0.024,bigCap:0.46,
+    bossHpMul:1.75,bossSpMul:1.18,bossDmg:82,
+    riskyBase:0.44,riskyPer:0.036,riskyCap:0.7,
+    gateNeedMul:2,gateSpMul:1.12,gateGapMul:0.9
+  },
+  insane:{
+    id:'insane',label:'Insane',banner:'INSANE',color:'#ff6b6b',
+    hint:'Brutal pressure. Leaks hurt fast',
+    hp0:2.95,hpW:1.9,hpExp:1.23,hpCurve:0.034,bigMul:3.5,speedMul:1.18,
+    dmgSmall:10,dmgBig:20,countMul:1.32,gapMul:0.78,gapFloor:0.2,
+    doubleAfter:2,doubleP:0.48,bigBase:0.17,bigPer:0.028,bigCap:0.55,
+    bossHpMul:2.15,bossSpMul:1.28,bossDmg:100,
+    riskyBase:0.54,riskyPer:0.04,riskyCap:0.8,
+    gateNeedMul:2.35,gateSpMul:1.18,gateGapMul:0.82
+  }
+};
+const MODE_ORDER=['normal','hard','insane'];
+const BEST_KEYS={normal:'laneClashBest',hard:'laneClashBestHard',insane:'laneClashBestInsane'};
+const bests={normal:0,hard:0,insane:0};
+let selected='normal';
+function modeBy(id){return MODES[id]||MODES.normal;}
+function selMode(){return modeBy(selected);}
+function loadMeta(){
+  try{
+    for(const id of MODE_ORDER){
+      const n=+localStorage.getItem(BEST_KEYS[id])||0;
+      bests[id]=n>0?n:0;
+    }
+    const saved=localStorage.getItem('laneClashDifficulty');
+    if(MODES[saved]) selected=saved;
+  }catch(e){}
+}
+function saveBest(id){try{localStorage.setItem(BEST_KEYS[id],String(bests[id]));}catch(e){}}
+function saveSelected(){try{localStorage.setItem('laneClashDifficulty',selected);}catch(e){}}
+loadMeta();
+function bestFor(id){return bests[id]||0;}
+function setDifficulty(id){
+  if(!MODES[id]||state==='play') return false;
+  selected=id;saveSelected();return true;
+}
+function hordeCount(m,w){return Math.max(1,Math.round((6+Math.floor(w*2.5))*m.countMul));}
+function spawnGap(m,w){return Math.max(m.gapFloor,Math.max(0.28,1.1-w*0.05)*m.gapMul);}
+function meanSmallHp(m,w){return (m.hp0+w*m.hpW)*Math.pow(m.hpExp,w)*(1+w*w*m.hpCurve);}
 
 // ---------- audio (tiny synth, optional) ----------
 let AC=null;
@@ -63,63 +130,67 @@ const LANE_W=W/2;
 let state='menu',G=null,shake=0,flash=0,t=0;
 function laneCenter(i){return LANE_W*i+LANE_W/2;}
 function newGame(){
+  const diffId=selected,m=modeBy(diffId);
   G={hp:100,maxHp:100,score:0,kills:0,wave:0,
      rate:3,dmg:1,multi:1,squad:0,
      px:laneCenter(0),tx:laneCenter(0),
      upLane:0, // 0 = left lane has upgrades, right has horde
      bullets:[],enemies:[],gates:[],parts:[],texts:[],
-     fireT:0,gateT:1.2,spawnLeft:0,spawnT:0,waveT:0,bannerT:0,banner:'',bannerSub:'',
-     bossAlive:false,over:false};
+     fireT:0,gateT:1.2*m.gateGapMul,spawnLeft:0,spawnT:0,waveT:0,bannerT:0,banner:'',bannerSub:'',
+     bossAlive:false,over:false,diffId};
   startWave();
 }
 function hordeLane(){return 1-G.upLane;}
 function startWave(){
+  const m=modeBy(G.diffId);
   G.wave++;
   const w=G.wave;
   let sub='';
   if(w>1&&w%3===1){G.upLane=1-G.upLane;sub='LANES SWAPPED!';beep(300,0.4,'sawtooth',0.04);}
-  G.spawnLeft=6+Math.floor(w*2.5);
-  G.spawnT=1.5;
-  if(w%5===0){spawnBoss();sub='⚠ BOSS INCOMING ⚠';G.spawnLeft=Math.floor(G.spawnLeft*0.5);}
+  G.spawnLeft=hordeCount(m,w);
+  G.spawnT=1.5*m.gapMul;
+  if(w%5===0){spawnBoss();sub='⚠ BOSS INCOMING ⚠';G.spawnLeft=Math.max(1,Math.floor(G.spawnLeft*0.5));}
+  if(!sub) sub=m.banner;
   G.banner='WAVE '+w;G.bannerSub=sub;G.bannerT=2.2;
 }
 function spawnEnemy(){
-  const w=G.wave,l=hordeLane();
-  const big=Math.random()<Math.min(0.08+w*0.02,0.35);
-  const hp=Math.round((1+w*1.1)*Math.pow(1.16,w)*(big?3.5:1)*(0.8+Math.random()*0.4));
+  const m=modeBy(G.diffId),w=G.wave,l=hordeLane();
+  const big=Math.random()<Math.min(m.bigBase+w*m.bigPer,m.bigCap);
+  const hp=Math.max(1,Math.round(meanSmallHp(m,w)*(big?m.bigMul:1)*(0.8+Math.random()*0.4)));
   G.enemies.push({x:laneCenter(l)+rand(-LANE_W/2+22,LANE_W/2-22),y:-20,r:big?19:12,hp,maxHp:hp,
-    sp:(big?40:58)+w*3+rand(0,15),dmg:big?14:6,fl:0,boss:false,wob:rand(0,6),pts:big?30:10});
+    sp:((big?40:58)+w*3+rand(0,15))*m.speedMul,dmg:big?m.dmgBig:m.dmgSmall,fl:0,boss:false,wob:rand(0,6),pts:big?30:10});
 }
 function spawnBoss(){
-  const w=G.wave,l=hordeLane(),hp=Math.round((55*w+w*w*6)*Math.pow(1.1,w));
-  G.enemies.push({x:laneCenter(l),y:-60,r:42,hp,maxHp:hp,sp:22+w*0.8,dmg:60,fl:0,boss:true,wob:0,pts:500+w*50});
+  const m=modeBy(G.diffId),w=G.wave,l=hordeLane();
+  const hp=Math.max(1,Math.round((55*w+w*w*6)*Math.pow(1.1,w)*m.bossHpMul));
+  G.enemies.push({x:laneCenter(l),y:-60,r:42,hp,maxHp:hp,sp:(22+w*0.8)*m.bossSpMul,dmg:m.bossDmg,fl:0,boss:true,wob:0,pts:500+w*50});
   G.bossAlive=true;
 }
 const GATE_TYPES=[
-  {k:'rate',label:v=>(v>=0?'+':'')+v+' FIRE RATE',max:5},
-  {k:'dmg',label:v=>(v>=0?'+':'')+v+' DAMAGE',max:4},
+  {k:'rate',label:v=>(v>=0?'+':'')+v+' FIRE RATE',max:3},
+  {k:'dmg',label:v=>(v>=0?'+':'')+v+' DAMAGE',max:3},
   {k:'multi',label:v=>(v>=0?'+':'')+v+' MULTISHOT',max:2},
-  {k:'squad',label:v=>(v>=0?'+':'')+v+' SQUAD',max:3},
-  {k:'heal',label:v=>(v>=0?'+':'')+(v*10)+' HP',max:5},
+  {k:'squad',label:v=>(v>=0?'+':'')+v+' SQUAD',max:2},
+  {k:'heal',label:v=>(v>=0?'+':'')+(v*10)+' HP',max:3},
 ];
 function spawnGate(){
-  const w=G.wave;
+  const m=modeBy(G.diffId),w=G.wave;
   let type=GATE_TYPES[randi(0,GATE_TYPES.length-1)];
-  if(G.multi>=7&&type.k==='multi')type=GATE_TYPES[0];
-  if(G.squad>=10&&type.k==='squad')type=GATE_TYPES[1];
-  const risky=Math.random()<Math.min(0.25+w*0.03,0.55);
-  let v=risky?-randi(1,type.k==='heal'?3:2):randi(1,type.k==='heal'?3:2);
-  // hits needed to raise value by 1
-  const need=Math.round(5+w*1.5);
-  G.gates.push({x:laneCenter(G.upLane),y:-40,w:LANE_W-24,h:52,type,v,prog:0,need,sp:85+w*2,fl:0,lane:G.upLane});
+  if(G.multi>=PLAYER.multiMax&&type.k==='multi')type=GATE_TYPES[0];
+  if(G.squad>=PLAYER.squadMax&&type.k==='squad')type=GATE_TYPES[1];
+  const risky=Math.random()<Math.min(m.riskyBase+w*m.riskyPer,m.riskyCap);
+  // Non-heal gates step by 1 so one lucky gate cannot double the squad or the damage.
+  let v=type.k==='heal'?(risky?-randi(1,2):randi(1,2)):(risky?-1:1);
+  const need=Math.max(4,Math.round((5+w*1.5)*m.gateNeedMul));
+  G.gates.push({x:laneCenter(G.upLane),y:-40,w:LANE_W-24,h:52,type,v,prog:0,need,sp:(85+w*2)*m.gateSpMul,fl:0,lane:G.upLane});
 }
 function applyGate(g){
-  const v=g.v,k=g.type.k;
-  if(k==='rate')G.rate=clamp(G.rate+v*0.8,1,22);
-  if(k==='dmg')G.dmg=clamp(G.dmg+v,1,50);
-  if(k==='multi')G.multi=clamp(G.multi+v,1,7);
-  if(k==='squad')G.squad=clamp(G.squad+v,0,10);
-  if(k==='heal')G.hp=clamp(G.hp+v*10,0,G.maxHp);
+  const v=g.v,k=g.type.k,p=PLAYER;
+  if(k==='rate')G.rate=clamp(G.rate+v*p.ratePer,p.rateMin,p.rateMax);
+  if(k==='dmg')G.dmg=clamp(G.dmg+v*p.dmgPer,p.dmgMin,p.dmgMax);
+  if(k==='multi')G.multi=clamp(G.multi+v*p.multiPer,p.multiMin,p.multiMax);
+  if(k==='squad')G.squad=clamp(G.squad+v*p.squadPer,p.squadMin,p.squadMax);
+  if(k==='heal')G.hp=clamp(G.hp+v*p.healPer,0,G.maxHp);
   const good=v>=0;
   addText(g.x,g.y,g.type.label(v),good?'#7dffb0':'#ff6b6b',22);
   burst(g.x,g.y,good?'#2ecc71':'#e74c3c',22,220);
@@ -151,7 +222,8 @@ function addText(x,y,s,c,sz){if(G.texts.length>80)G.texts.shift();G.texts.push({
 function gameOver(){
   if(state!=='play')return;
   state='over';G.over=true;overT=0;
-  if(G.score>BEST){BEST=G.score;saveBest();G.newBest=true;}
+  const id=G.diffId;
+  if(G.score>bests[id]){bests[id]=G.score;saveBest(id);G.newBest=true;}
   burst(G.px,pY(),'#ffcc00',60,350);shake=18;beep(90,0.8,'sawtooth',0.06);
 }
 let overT=0;
@@ -168,6 +240,7 @@ function update(dt){
   for(const tx of G.texts){tx.y-=40*dt;tx.life-=dt*0.9;}
   G.texts=G.texts.filter(x=>x.life>0);
   if(state!=='play'){overT+=dt;return;}
+  const m=modeBy(G.diffId);
   // keyboard
   if(keys.left)G.tx-=420*dt;if(keys.right)G.tx+=420*dt;
   G.tx=clamp(G.tx,18,W-18);
@@ -180,10 +253,10 @@ function update(dt){
   // spawns
   if(G.bannerT>0)G.bannerT-=dt;
   G.spawnT-=dt;
-  if(G.spawnLeft>0&&G.spawnT<=0){spawnEnemy();G.spawnLeft--;G.spawnT=Math.max(0.28,1.1-G.wave*0.05)*rand(0.6,1.3);
-    if(G.wave>4&&Math.random()<0.25&&G.spawnLeft>0){spawnEnemy();G.spawnLeft--;}}
+  if(G.spawnLeft>0&&G.spawnT<=0){spawnEnemy();G.spawnLeft--;G.spawnT=spawnGap(m,G.wave)*rand(0.6,1.3);
+    if(G.wave>m.doubleAfter&&Math.random()<m.doubleP&&G.spawnLeft>0){spawnEnemy();G.spawnLeft--;}}
   G.gateT-=dt;
-  if(G.gateT<=0){spawnGate();G.gateT=rand(2.0,2.8);}
+  if(G.gateT<=0){spawnGate();G.gateT=rand(2.0,2.8)*m.gateGapMul;}
   // enemies
   const line=pY()+10;
   for(const e of G.enemies){
@@ -254,9 +327,11 @@ function drawBG(){
     ctx.fillStyle=isUp?'rgba(46,204,113,0.07)':'rgba(231,76,60,0.08)';
     const off=(t*80)%60;
     for(let y=-60+off;y<H;y+=60)ctx.fillRect(l*LANE_W+8,y,LANE_W-16,24);
-    ctx.font='bold 13px system-ui,sans-serif';ctx.textAlign='center';
-    ctx.fillStyle=isUp?'rgba(125,255,176,0.55)':'rgba(255,120,120,0.55)';
-    ctx.fillText(isUp?'⬆ UPGRADES':'☠ HORDE',laneCenter(l),H-18);
+    if(state==='play'){
+      ctx.font='bold 13px system-ui,sans-serif';ctx.textAlign='center';
+      ctx.fillStyle=isUp?'rgba(125,255,176,0.55)':'rgba(255,120,120,0.55)';
+      ctx.fillText(isUp?'⬆ UPGRADES':'☠ HORDE',laneCenter(l),H-18);
+    }
   }
   ctx.fillStyle='rgba(255,255,255,0.25)';ctx.fillRect(LANE_W-1.5,0,3,H);
   // defense line
@@ -298,12 +373,16 @@ function drawGate(g){
   ctx.fillStyle='#ffe066';ctx.fillRect(x+10,y+g.h-9,(g.w-20)*(g.prog/g.need),4);
 }
 function drawHUD(){
+  const rm=modeBy(G.diffId);
   // top bar
   ctx.fillStyle='rgba(0,0,0,0.45)';ctx.fillRect(0,0,W,58);
   ctx.textAlign='left';ctx.fillStyle='#fff';ctx.font='bold 18px system-ui,sans-serif';
   ctx.fillText('WAVE '+G.wave,12,24);
-  ctx.textAlign='right';ctx.fillText(G.score.toLocaleString(),W-12,24);
-  ctx.font='11px system-ui,sans-serif';ctx.fillStyle='#adb5bd';ctx.fillText('BEST '+Math.max(BEST,G.score).toLocaleString(),W-12,40);
+  ctx.font='bold 12px system-ui,sans-serif';ctx.fillStyle=rm.color;
+  ctx.fillText(rm.label,12,42);
+  ctx.textAlign='right';ctx.fillStyle='#fff';ctx.font='bold 18px system-ui,sans-serif';
+  ctx.fillText(G.score.toLocaleString(),W-12,24);
+  ctx.font='11px system-ui,sans-serif';ctx.fillStyle='#adb5bd';ctx.fillText('BEST '+Math.max(bestFor(G.diffId),G.score).toLocaleString(),W-12,40);
   // hp bar
   const hw=180,hx=W/2-hw/2;ctx.fillStyle='#343a40';rr(hx,10,hw,14,7);ctx.fill();
   const f=G.hp/G.maxHp;ctx.fillStyle=f>0.5?'#51cf66':f>0.25?'#fcc419':'#ff6b6b';rr(hx,10,Math.max(0.01,hw*f),14,7);ctx.fill();
@@ -344,45 +423,96 @@ function render(){
   if(state==='over')drawOver();
   ctx.restore();
 }
-function drawMenu(){
-  ctx.fillStyle='rgba(5,8,20,0.78)';ctx.fillRect(0,0,W,H);
-  const y0=H*0.16;
-  center('LANE',y0,58,'#51cf66','900');center('CLASH',y0+56,58,'#ff6b6b','900');
-  const lines=['HOW TO PLAY',
-    '👆 Drag or tap left/right to switch lanes',
-    '🔫 Your squad fires automatically',
-    '🟩 Upgrade lane: walk through gates',
-    '   to power up. Shoot a gate to raise',
-    '   its number. Red gates hurt you!',
-    '🟥 Horde lane: monsters that reach',
-    '   the red line cost you HP',
-    '⚖️ Balance grabbing upgrades with',
-    '   holding back the horde',
-    '🔄 Lanes swap every few waves',
-    '👹 Boss every 5 waves'];
-  let y=y0+110;
-  for(let i=0;i<lines.length;i++){
-    if(i===0){center(lines[i],y,18,'#ffe066');y+=30;continue;}
-    ctx.font='15px system-ui,sans-serif';ctx.fillStyle='#e9ecef';ctx.textAlign='left';ctx.fillText(lines[i],40,y);y+=23;
+function chromeGeom(){
+  const btnW=118,btnH=62,gap=10;
+  const x0=(W-(btnW*3+gap*2))/2;
+  const titleY=Math.max(50,Math.min(78,H*0.075));
+  // Keep the selector in the lower thumb zone, clear of the bottom edge.
+  const bestY=H-34,startY=bestY-36,hintY=startY-42;
+  const btnY=hintY-22-btnH,labelY=btnY-22;
+  const howTop=titleY+96;
+  const howRoom=Math.max(0,labelY-28-howTop);
+  const howLH=Math.min(24,Math.max(16,howRoom/7));
+  return {btnW,btnH,gap,x0,bestY,startY,hintY,btnY,labelY,titleY,howTop,howLH};
+}
+function buttonRects(){
+  const g=chromeGeom();
+  return MODE_ORDER.map((id,i)=>({id,x:g.x0+i*(g.btnW+g.gap),y:g.btnY,w:g.btnW,h:g.btnH}));
+}
+function drawDifficultyPicker(g){
+  const caption=state==='over'?'NEXT RUN':'DIFFICULTY';
+  ctx.textAlign='center';ctx.textBaseline='alphabetic';
+  ctx.font='bold 13px system-ui,sans-serif';ctx.fillStyle='#ffe066';
+  ctx.fillText(caption,W/2,g.labelY);
+  for(const b of buttonRects()){
+    const m=modeBy(b.id),on=selected===b.id,y=b.y+(pressId===b.id?2:0);
+    ctx.fillStyle=on?m.color:'rgba(8,12,24,0.78)';
+    rr(b.x,y,b.w,b.h,16);ctx.fill();
+    ctx.lineWidth=on?4:2;ctx.strokeStyle=on?'#fff':m.color;ctx.stroke();
+    ctx.fillStyle=on?'#0b0f1e':'#f8f9fa';
+    ctx.font='bold 20px system-ui,sans-serif';ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.fillText(m.label,b.x+b.w/2,y+b.h/2+1);
   }
-  const pulse=0.6+0.4*Math.sin(t*4);ctx.globalAlpha=pulse;center('TAP TO START',Math.min(H-60,y+50),26,'#fff');ctx.globalAlpha=1;
-  if(BEST>0)center('Best: '+BEST.toLocaleString(),Math.min(H-28,y+82),15,'#adb5bd','normal');
+  const m=selMode();
+  ctx.textBaseline='alphabetic';ctx.textAlign='center';
+  ctx.font='15px system-ui,sans-serif';ctx.fillStyle=m.color;
+  ctx.fillText(m.label+' · '+m.hint,W/2,g.hintY);
+}
+function drawMenu(){
+  const g=chromeGeom();
+  ctx.fillStyle='rgba(5,8,20,0.9)';ctx.fillRect(0,0,W,H);
+  center('LANE',g.titleY,54,'#51cf66','900');center('CLASH',g.titleY+52,54,'#ff6b6b','900');
+  const lines=['HOW TO PLAY',
+    '👆  Drag or tap to switch lanes',
+    '🔫  Your squad fires automatically',
+    '🟩  Green lane: walk gates to upgrade',
+    '     Shoot a gate to raise it. Red hurts',
+    '🟥  Red lane: leaks cost you HP',
+    '🔄  Lanes swap. Boss every 5 waves'];
+  const top=g.howTop,bottom=g.labelY-16,lh=g.howLH;
+  let y=top;
+  for(let i=0;i<lines.length;i++){
+    if(y>bottom) break;
+    if(i===0){center(lines[i],y,16,'#ffe066');y+=lh+4;continue;}
+    ctx.font='15px system-ui,sans-serif';ctx.fillStyle='#e9ecef';ctx.textAlign='left';ctx.fillText(lines[i],28,y);y+=lh;
+  }
+  drawDifficultyPicker(g);
+  const pulse=0.6+0.4*Math.sin(t*4);ctx.globalAlpha=pulse;center('TAP TO START',g.startY,26,'#fff');ctx.globalAlpha=1;
+  const best=bestFor(selected);
+  if(best>0)center(selMode().label+' best: '+best.toLocaleString(),g.bestY,15,'#adb5bd','normal');
 }
 function drawOver(){
-  ctx.fillStyle='rgba(5,8,20,0.8)';ctx.fillRect(0,0,W,H);
-  center('OVERRUN!',H*0.28,52,'#ff6b6b','900');
-  center('Wave '+G.wave+'  •  '+G.kills+' kills',H*0.28+46,18,'#ced4da','normal');
-  center(G.score.toLocaleString(),H*0.28+120,56,'#fff','900');
-  center(G.newBest?'★ NEW BEST! ★':'Best: '+BEST.toLocaleString(),H*0.28+156,20,G.newBest?'#ffe066':'#adb5bd');
-  if(overT>0.8){const pulse=0.6+0.4*Math.sin(t*4);ctx.globalAlpha=pulse;center('TAP TO PLAY AGAIN',H*0.28+240,24,'#fff');ctx.globalAlpha=1;}
+  const g=chromeGeom();
+  ctx.fillStyle='rgba(5,8,20,0.9)';ctx.fillRect(0,0,W,H);
+  const rm=modeBy(G.diffId);
+  const y0=Math.max(64,Math.min(H*0.15,g.labelY-210));
+  center('OVERRUN!',y0,48,'#ff6b6b','900');
+  center(rm.label,y0+36,22,rm.color);
+  center('Wave '+G.wave+'  •  '+G.kills+' kills',y0+64,16,'#ced4da','normal');
+  center(G.score.toLocaleString(),y0+116,52,'#fff','900');
+  center(G.newBest?'★ New best for '+rm.label+'! ★':rm.label+' best: '+bestFor(G.diffId).toLocaleString(),y0+152,18,G.newBest?'#ffe066':'#adb5bd',G.newBest?'bold':'normal');
+  drawDifficultyPicker(g);
+  if(overT>0.8){const pulse=0.6+0.4*Math.sin(t*4);ctx.globalAlpha=pulse;center('TAP TO PLAY AGAIN',g.startY,24,'#fff');ctx.globalAlpha=1;}
 }
 
 // ---------- input ----------
 const keys={left:false,right:false};
-function toGameX(clientX){return (clientX-offX())/scale;}
-let drag=null;
-function onDown(cx){
+function toGame(cx,cy){return {x:(cx-offX())/scale,y:cy/scale};}
+function hitDifficulty(x,y){
+  if(state==='play') return null;
+  const pad=3;
+  for(const b of buttonRects()){
+    if(x>=b.x-pad&&x<=b.x+b.w+pad&&y>=b.y-pad&&y<=b.y+b.h+pad) return b.id;
+  }
+  return null;
+}
+let drag=null,pressId=null;
+function onDown(cx,cy){
   initAudio();if(AC&&AC.state==='suspended')AC.resume();
+  const p=toGame(cx,cy);
+  const hit=hitDifficulty(p.x,p.y);
+  if(hit){pressId=hit;drag=null;return;}
+  pressId=null;
   if(state==='menu'){state='play';newGame();return;}
   if(state==='over'){if(overT>0.8){state='play';newGame();}return;}
   drag={x0:cx,gx0:G.tx,moved:false,t0:performance.now()};
@@ -393,20 +523,31 @@ function onMove(cx){
   if(Math.abs(dx)>6)drag.moved=true;
   if(drag.moved)G.tx=clamp(drag.gx0+dx*1.4,18,W-18);
 }
-function onUp(cx){
+function onUp(cx,cy){
+  if(pressId){
+    const p=toGame(cx,cy);
+    const hit=hitDifficulty(p.x,p.y);
+    if(hit===pressId) setDifficulty(hit);
+    pressId=null;drag=null;return;
+  }
   if(!drag||state!=='play'){drag=null;return;}
-  if(!drag.moved){const gx=toGameX(cx);G.tx=laneCenter(gx<LANE_W?0:1);}
+  if(!drag.moved){const gx=toGame(cx,0).x;G.tx=laneCenter(gx<LANE_W?0:1);}
   drag=null;
 }
-cv.addEventListener('pointerdown',e=>{e.preventDefault();onDown(e.clientX);},{passive:false});
+cv.addEventListener('pointerdown',e=>{e.preventDefault();onDown(e.clientX,e.clientY);},{passive:false});
 window.addEventListener('pointermove',e=>onMove(e.clientX));
-window.addEventListener('pointerup',e=>onUp(e.clientX));
-window.addEventListener('pointercancel',()=>{drag=null;});
+window.addEventListener('pointerup',e=>onUp(e.clientX,e.clientY));
+window.addEventListener('pointercancel',()=>{drag=null;pressId=null;});
 document.addEventListener('touchmove',e=>e.preventDefault(),{passive:false});
 window.addEventListener('keydown',e=>{
+  if(state!=='play'){
+    if(e.key==='1')setDifficulty('normal');
+    if(e.key==='2')setDifficulty('hard');
+    if(e.key==='3')setDifficulty('insane');
+  }
   if(e.key==='ArrowLeft'||e.key==='a'||e.key==='A')keys.left=true;
   if(e.key==='ArrowRight'||e.key==='d'||e.key==='D')keys.right=true;
-  if(e.key===' '||e.key==='Enter'){if(state!=='play')onDown(0);}
+  if(e.key===' '||e.key==='Enter'){if(state!=='play')onDown(0,0);}
   if(state==='play'&&(e.key==='1'))G.tx=laneCenter(0);
   if(state==='play'&&(e.key==='2'))G.tx=laneCenter(1);
 });
@@ -424,8 +565,36 @@ function frame(now){
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
-// tiny debug hook for automated tests
-window.__lane={get state(){return state;},get G(){return G;},step:(s)=>{for(let i=0;i<s*60;i++)update(1/60);render();}};
+function combatSnapshot(id,wave){
+  const m=modeBy(id),w=wave;
+  const hp=meanSmallHp(m,w);
+  const count=hordeCount(m,w);
+  const gap=spawnGap(m,w);
+  return {
+    label:m.label,hp,count,gap,speed:(58+w*3)*m.speedMul,dmg:m.dmgSmall,
+    bossHp:Math.round((55*w+w*w*6)*Math.pow(1.1,w)*m.bossHpMul),
+    bossDmg:m.bossDmg,bossSp:(22+w*0.8)*m.bossSpMul,
+    risky:Math.min(m.riskyBase+w*m.riskyPer,m.riskyCap),
+    gateNeed:Math.max(4,Math.round((5+w*1.5)*m.gateNeedMul)),
+    dpsNeed:hp/gap
+  };
+}
+function clientFromGame(x,y){return {x:offX()+x*scale,y:y*scale};}
+// debug hook for automated tests
+window.__lane={
+  get state(){return state;},
+  get G(){return G;},
+  get difficulty(){return selected;},
+  get runDifficulty(){return G?G.diffId:null;},
+  get bests(){return {normal:bests.normal,hard:bests.hard,insane:bests.insane};},
+  get buttons(){return buttonRects();},
+  get defenseY(){return pY();},
+  geom(){return chromeGeom();},
+  setDifficulty(id){return setDifficulty(id);},
+  snapshot(id,wave){return combatSnapshot(id,wave);},
+  tap(x,y){const c=clientFromGame(x,y);onDown(c.x,c.y);onUp(c.x,c.y);},
+  step(s,draw){const n=Math.max(0,Math.round(s*60));for(let i=0;i<n;i++){update(1/60);if(draw!==false)render();}if(draw===false)render();}
+};
 })();
 </script>
 </body>
