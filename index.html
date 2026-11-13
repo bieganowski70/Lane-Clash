@@ -53,13 +53,16 @@ const rand=(a,b)=>a+Math.random()*(b-a), randi=(a,b)=>Math.floor(rand(a,b+1)), c
 const MODES={
   normal:{id:'normal',label:'Normal',banner:'NORMAL',color:'#51cf66',hint:'More enemies than the original',
     count:1.5,gap:0.8,gapFloor:0.22,delay:1.25,doubleAfter:2,doubleP:0.32,
-    hp:1,speed:1,dmg:1,bigAdd:0,bossHp:1,bossSp:1,bossDmg:1},
+    hp:1,speed:1,dmg:1,bigAdd:0,bossHp:1,bossSp:1,bossDmg:1,
+    multiFrom:4,powerFrom:3,powerP:0.12},
   hard:{id:'hard',label:'Hard',banner:'HARD',color:'#fcc419',hint:'Denser, faster, tougher horde',
     count:1.9,gap:0.66,gapFloor:0.18,delay:1.05,doubleAfter:1,doubleP:0.4,
-    hp:1.28,speed:1.12,dmg:1.25,bigAdd:0.05,bossHp:1.4,bossSp:1.12,bossDmg:1.3},
+    hp:1.28,speed:1.12,dmg:1.25,bigAdd:0.05,bossHp:1.4,bossSp:1.12,bossDmg:1.3,
+    multiFrom:5,powerFrom:4,powerP:0.1},
   crazy:{id:'crazy',label:'Crazy',banner:'CRAZY',color:'#ff6b6b',hint:'Relentless packs and heavy bosses',
     count:2.05,gap:0.62,gapFloor:0.16,delay:0.95,doubleAfter:1,doubleP:0.48,
-    hp:1.55,speed:1.2,dmg:1.5,bigAdd:0.1,bossHp:1.75,bossSp:1.22,bossDmg:1.55}
+    hp:1.55,speed:1.2,dmg:1.5,bigAdd:0.1,bossHp:1.75,bossSp:1.22,bossDmg:1.55,
+    multiFrom:6,powerFrom:5,powerP:0.1}
 };
 const MODE_ORDER=['normal','hard','crazy'];
 const BEST_KEYS={normal:'laneClashBest',hard:'laneClashBestHard',crazy:'laneClashBestCrazy'};
@@ -168,7 +171,9 @@ function pickPowerId(){
 }
 function spawnGate(){
   const w=G.wave;
-  if(Math.random()<0.16){
+  const m=modeBy(G.diffId);
+  // Multishot and purple gates wait until these waves, then purple gates roll less often.
+  if(w>=m.powerFrom&&Math.random()<m.powerP){
     const id=pickPowerId();
     if(id){
       const meta=powerMeta(id);
@@ -179,6 +184,10 @@ function spawnGate(){
     }
   }
   let type=GATE_TYPES[randi(0,GATE_TYPES.length-1)];
+  if(w<m.multiFrom&&type.k==='multi'){
+    const rest=GATE_TYPES.filter(t=>t.k!=='multi');
+    type=rest[randi(0,rest.length-1)];
+  }
   if(G.multi>=7&&type.k==='multi') type=GATE_TYPES[0];
   if(G.squad>=10&&type.k==='squad') type=GATE_TYPES[1];
   const risky=Math.random()<Math.min(0.25+w*0.03,0.55);
